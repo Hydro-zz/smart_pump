@@ -48,23 +48,20 @@ unsigned long postRunStartTime = 0;
 // Функция чтения датчика TM7711 с отключением прерываний
 long readTM7711() {
   unsigned long count = 0;
-  
-  // Переносим noInterrupts максимально близко к циклу
   noInterrupts(); 
-  
   for (int i = 0; i < 24; i++) {
     digitalWrite(pinSCK, HIGH);
-    // Пауза не нужна, скорость выполнения digitalWrite на ESP8266 идеальна для TM7711
+    delayMicroseconds(5);
     count = count << 1;
     digitalWrite(pinSCK, LOW);
+    delayMicroseconds(5);
     if (digitalRead(pinDT)) count++;
   }
-  
-  // 25-й импульс для перевода датчика в режим следующего измерения
   digitalWrite(pinSCK, HIGH); 
+  delayMicroseconds(5);
   digitalWrite(pinSCK, LOW);
-  
-  interrupts(); // Мгновенно возвращаем управление системе
+  delayMicroseconds(5);
+  interrupts(); 
   
   long signed_data = count;
   if (count & 0x800000) signed_data |= 0xFF000000;
@@ -73,28 +70,12 @@ long readTM7711() {
 
 // ОРИГИНАЛЬНЫЙ СТАБИЛЬНЫЙ ФИЛЬТР 100 МС ДЛЯ ЧИПА TM7711 (ВОЗВРАЩЕН НА МЕСТО)
 long getSmoothPressure() {
-  long readings[5]; // <-- ИСПРАВЛЕНО: Теперь это корректный массив на 5 элементов
-  
-  // 1. Собираем 5 замеров
+  long sum = 0;
   for (int i = 0; i < 5; i++) {
-    readings[i] = readTM7711();
-    delay(20); // Даем Wi-Fi стеку ESP8266 время на обработку фоновых запросов
+    sum += readTM7711();
+    delay(100); 
   }
-  
-  // 2. Сортируем массив по возрастанию (сортировка пузырьком)
-  for (int i = 0; i < 4; i++) {
-    for (int j = i + 1; j < 5; j++) {
-      if (readings[i] > readings[j]) {
-        long temp = readings[i];
-        readings[i] = readings[j];
-        readings[j] = temp;
-      }
-    }
-  }
-  
-  // 3. Возвращаем медиану — центральный элемент (индекс 2)
-  // Любые одиночные просадки до нуля уйдут в начало массива и полностью отсекутся
-  return readings[2];
+  return sum / 5;
 }
 
 // Универсальный расчет процентов для откачки и закачки
@@ -487,13 +468,18 @@ void loop() {
             pumpState = true; pumpStartTime = millis(); isPostRunning = false;
             Serial.println("ОТКАЧКА: Порог включения превышен! Начало работы.");
           }
-          if (currentPressure <= user_data.lowLevel && pumpState && !isPostRunning) {
-            if (user_data.postRunTimeout > 0) {
-              isPostRunning = true; postRunStartTime = millis();
-              Serial.println("ОТКАЧКА: Порог выключения достигнут. Старт докачки.");
-            } else {
-              pumpState = false;
-              Serial.println("ОТКАЧКА: Порог выключения достигнут. Выключение.");
+          if (pumpState) {
+            if (!isPostRunning && currentPressure <= user_data.lowLevel) {
+              if (user_data.postRunTimeout > 0) {
+                isPostRunning = true; postRunStartTime = millis();
+                Serial.println("ОТКАЧКА: Порог выключения достигнут. Старт докачки.");
+              } else {
+                pumpState = false;
+                Serial.println("ОТКАЧКА: Порог выключения достигнут. Выключение.");
+              }
+            } else if (isPostRunning && currentPressure > user_data.lowLevel) {
+              isPostRunning = false;
+              Serial.println("ОТКАЧКА: Давление снова выше порога. Продолжаем работу.");
             }
           }
         } 
@@ -504,13 +490,18 @@ void loop() {
             pumpState = true; pumpStartTime = millis(); isPostRunning = false;
             Serial.println("ЗАКАЧКА: Уровень упал ниже порога! Начало наполнения.");
           }
-          if (currentPressure >= user_data.lowLevel && pumpState && !isPostRunning) {
-            if (user_data.postRunTimeout > 0) {
-              isPostRunning = true; postRunStartTime = millis();
-              Serial.println("ЗАКАЧКА: Порог выключения достигнут. Старт доп. времени.");
-            } else {
-              pumpState = false;
-              Serial.println("ЗАКАЧКА: Порог выключения достигнут. Выключение.");
+          if (pumpState) {
+            if (!isPostRunning && currentPressure >= user_data.lowLevel) {
+              if (user_data.postRunTimeout > 0) {
+                isPostRunning = true; postRunStartTime = millis();
+                Serial.println("ЗАКАЧКА: Порог выключения достигнут. Старт доп. времени.");
+              } else {
+                pumpState = false;
+                Serial.println("ЗАКАЧКА: Порог выключения достигнут. Выключение.");
+              }
+            } else if (isPostRunning && currentPressure < user_data.lowLevel) {
+              isPostRunning = false;
+              Serial.println("ЗАКАЧКА: Уровень снова ниже порога. Продолжаем наполнение.");
             }
           }
         }
