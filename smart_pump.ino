@@ -48,34 +48,53 @@ unsigned long postRunStartTime = 0;
 // Функция чтения датчика TM7711 с отключением прерываний
 long readTM7711() {
   unsigned long count = 0;
+  
+  // Переносим noInterrupts максимально близко к циклу
   noInterrupts(); 
+  
   for (int i = 0; i < 24; i++) {
     digitalWrite(pinSCK, HIGH);
-    delayMicroseconds(5);
+    // Пауза не нужна, скорость выполнения digitalWrite на ESP8266 идеальна для TM7711
     count = count << 1;
     digitalWrite(pinSCK, LOW);
-    delayMicroseconds(5);
     if (digitalRead(pinDT)) count++;
   }
+  
+  // 25-й импульс для перевода датчика в режим следующего измерения
   digitalWrite(pinSCK, HIGH); 
-  delayMicroseconds(5);
   digitalWrite(pinSCK, LOW);
-  delayMicroseconds(5);
-  interrupts(); 
+  
+  interrupts(); // Мгновенно возвращаем управление системе
   
   long signed_data = count;
   if (count & 0x800000) signed_data |= 0xFF000000;
   return signed_data;
 }
 
+
 // ОРИГИНАЛЬНЫЙ СТАБИЛЬНЫЙ ФИЛЬТР 100 МС ДЛЯ ЧИПА TM7711 (ВОЗВРАЩЕН НА МЕСТО)
 long getSmoothPressure() {
-  long sum = 0;
+  long readings[5];
+  
   for (int i = 0; i < 5; i++) {
-    sum += readTM7711();
-    delay(100); 
+    readings[i] = readTM7711();
+    delay(20); // Пауза между замерами, даем ESP8266 "подышать" сетевым стеком
   }
-  return sum / 5;
+  
+  // Простая сортировка массива по возрастанию
+  for (int i = 0; i < 4; i++) {
+    for (int j = i + 1; j < 5; j++) {
+      if (readings[i] > readings[j]) {
+        long temp = readings[i];
+        readings[i] = readings[j];
+        readings[j] = temp;
+      }
+    }
+  }
+  
+  // Возвращаем строго МЕДИАНУ (третий элемент отсортированного списка)
+  // Любые одиночные просадки до нуля или огромные минусы останутся в readings[0] или readings[1] и не пройдут дальше
+  return readings[2];
 }
 
 // Универсальный расчет процентов для откачки и закачки
