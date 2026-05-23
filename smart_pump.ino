@@ -18,9 +18,10 @@ struct Settings {
   uint32_t configID;   
   char ssid[32];       
   char pass[32];       
-  long lowLevel;       
-  long highLevel;      
+  long lowLevel;       // Порог ВЫКЛЮЧЕНИЯ
+  long highLevel;      // Порог ВКЛЮЧЕНИЯ
   unsigned long timeoutValue; 
+  unsigned long postRunTimeout; // НОВАЯ НАСТРОЙКА: доп. секунды работы после порога выключения
   char otaUser[32];    // Динамический логин для страницы /update
   char otaPass[32];    // Динамический пароль для страницы /update
 } user_data;
@@ -39,6 +40,10 @@ unsigned long runningSeconds = 0;
 long secondsLeft = 0;             
 int wifiSignalPct = 0;            
 long wifiSignalDbm = 0;           
+
+// Переменные для логики докачки
+bool isPostRunning = false; 
+unsigned long postRunStartTime = 0;
 
 // Функция чтения датчика TM7711 с отключением прерываний
 long readTM7711() {
@@ -73,10 +78,21 @@ long getSmoothPressure() {
   return sum / 5;
 }
 
-int calculatePercent(long current, long low, long high) {
-  if (high <= low) return 0;
-  float pct = ((float)(current - low) / (float)(high - low)) * 100.0;
+// Универсальный расчет процентов для откачки и закачки
+int calculatePercent(long current, long offLevel, long onLevel) {
+  long minL = (offLevel < onLevel) ? offLevel : onLevel;
+  long maxL = (offLevel > onLevel) ? offLevel : onLevel;
+  
+  if (maxL <= minL) return 0;
+  
+  float pct = ((float)(current - minL) / (float)(maxL - minL)) * 100.0;
   int result = (int)pct;
+  
+  // Если в режиме закачки (off > on), инвертируем проценты для наглядности наполнения емкости
+  if (offLevel > onLevel) {
+    result = 100 - result;
+  }
+
   if (result < 0) result = 0;
   if (result > 100) result = 100;
   return result;
@@ -125,7 +141,15 @@ void startClientMode() {
   currentPressure = getSmoothPressure();
   currentPercent = calculatePercent(currentPressure, user_data.lowLevel, user_data.highLevel);
   
-  if (currentPercent > 50) {
+  // Проверка старта с учетом направления работы системы
+  bool shouldStartPump = false;
+  if (user_data.lowLevel < user_data.highLevel) {
+    if (currentPercent > 50) shouldStartPump = true; // Откачка: бак полон более чем наполовину
+  } else {
+    if (currentPercent < 50) shouldStartPump = true; // Закачка: бак пуст более чем наполовину
+  }
+
+  if (shouldStartPump) {
     pumpState = true; pumpStartTime = millis();
     digitalWrite(pinRelay, HIGH); 
   } else {
@@ -160,9 +184,10 @@ void setupWebServerHandlers() {
       html += "Пароль администратора:<br><input type='password' name='ota_p' value='" + String(user_data.otaPass) + "' style='width:100%; padding:8px; margin-bottom:15px;'>";
       
       html += "<h3>3. Уровни давления и таймаут</h3>";
-      html += "Нижний порог:<br><input type='text' name='low' value='" + String(user_data.lowLevel) + "' style='width:100%; padding:8px; margin-bottom:15px;'>";
-      html += "Верхний порог:<br><input type='text' name='high' value='" + String(user_data.highLevel) + "' style='width:100%; padding:8px; margin-bottom:15px;'>";
-      html += "Таймаут (сек):<br><input type='text' name='timeout' value='" + String(user_data.timeoutValue) + "' style='width:100%; padding:8px; margin-bottom:20px;'>";
+      html += "Порог ВЫКЛЮЧЕНИЯ насоса:<br><input type='text' name='low' value='" + String(user_data.lowLevel) + "' style='width:100%; padding:8px; margin-bottom:15px;'>";
+      html += "Порог ВКЛЮЧЕНИЯ насоса:<br><input type='text' name='high' value='" + String(user_data.highLevel) + "' style='width:100%; padding:8px; margin-bottom:15px;'>";
+      html += "Доп. время после порога выкл (сек):<br><input type='text' name='post_run' value='" + String(user_data.postRunTimeout) + "' style='width:100%; padding:8px; margin-bottom:15px;'>";
+      html += "Таймаут аварии (сек):<br><input type='text' name='timeout' value='" + String(user_data.timeoutValue) + "' style='width:100%; padding:8px; margin-bottom:20px;'>";
       html += "<input type='submit' value='Сохранить все настройки' style='background:green; color:white; padding:12px; width:100%; border-radius:4px; cursor:pointer; font-size:1.1em; border:0;'>";
       html += "</form></body></html>";
       server.send(200, "text/html", html);
@@ -176,11 +201,15 @@ void setupWebServerHandlers() {
       } else if (manualMode) {
         stateText = pumpState ? "<b style='color:orange; font-size:1.4em;'>РУЧНОЙ РЕЖИМ: ВКЛ</b>" : "<b style='color:orange; font-size:1.4em;'>РУЧНОЙ РЕЖИМ: ВЫКЛ</b>";
       } else {
-        stateText = pumpState ? "<b style='color:green; font-size:1.4em;'>АВТО: ОТКАЧКА</b>" : "<b style='color:red; font-size:1.4em;'>АВТО: ОЖИДАНИЕ</b>";
+        if (user_data.lowLevel < user_data.highLevel) {
+          stateText = pumpState ? "<b style='color:green; font-size:1.4em;'>АВТО: ОТКАЧКА</b>" : "<b style='color:red; font-size:1.4em;'>АВТО: ОЖИДАНИЕ</b>";
+        } else {
+          stateText = pumpState ? "<b style='color:green; font-size:1.4em;'>АВТО: ЗАКАЧКА</b>" : "<b style='color:red; font-size:1.4em;'>АВТО: НАПОЛНЕНО</b>";
+        }
       }
       
       String html = "<html><head><meta charset='UTF-8'></head><body style='font-family:Arial; text-align:center; padding-top:20px; max-width:500px; margin:auto;'>";
-      html += "<h2>Дренажный колодец</h2><br>";
+      html += "<h2>Мониторинг резервуара</h2><br>";
       html += "<div style='width:80%; background:#ddd; margin:auto; border-radius:15px; overflow:hidden; border:1px solid #999;'>";
       html += "<div id='pbar' style='width:" + String(currentPercent) + "%; background:#3498db; height:30px; line-height:30px; color:white; font-weight:bold; transition: width 0.5s;'>" + String(currentPercent) + "%</div></div><br>";
       
@@ -213,9 +242,10 @@ void setupWebServerHandlers() {
       html += "<details><summary style='cursor:pointer; color:#007bff; font-weight:bold; margin-bottom:10px;'>Настройки Wi-Fi</summary>";
       html += "SSID:<br><input type='text' name='ssid' value='" + String(user_data.ssid) + "' style='width:100%; padding:6px; margin:5px 0 10px;'><br>";
       html += "Пароль:<br><input type='password' name='pass' value='" + String(user_data.pass) + "' style='width:100%; padding:6px; margin:5px 0 10px;'><br></details>";
-      html += "Нижний порог:<br><input type='text' name='low' value='" + String(user_data.lowLevel) + "' style='width:100%; padding:6px; margin:5px 0 10px;'><br>";
-      html += "Верхний порог:<br><input type='text' name='high' value='" + String(user_data.highLevel) + "' style='width:100%; padding:6px; margin:5px 0 10px;'><br>";
-      html += "Таймаут (сек):<br><input type='text' name='timeout' value='" + String(user_data.timeoutValue) + "' style='width:100%; padding:6px; margin:5px 0 15px;'><br>";
+      html += "Порог ВЫКЛЮЧЕНИЯ:<br><input type='text' name='low' value='" + String(user_data.lowLevel) + "' style='width:100%; padding:6px; margin:5px 0 10px;'><br>";
+      html += "Порог ВКЛЮЧЕНИЯ:<br><input type='text' name='high' value='" + String(user_data.highLevel) + "' style='width:100%; padding:6px; margin:5px 0 10px;'><br>";
+      html += "Доп. время после порога выкл (сек):<br><input type='text' name='post_run' value='" + String(user_data.postRunTimeout) + "' style='width:100%; padding:6px; margin:5px 0 10px;'><br>";
+      html += "Таймаут аварии (сек):<br><input type='text' name='timeout' value='" + String(user_data.timeoutValue) + "' style='width:100%; padding:6px; margin:5px 0 15px;'><br>";
       html += "<input type='submit' value='Применить изменения' style='background:#28a745; color:white; padding:10px; width:100%; border:0; border-radius:4px; font-weight:bold; cursor:pointer;'>";
       html += "</form></div>";
 
@@ -243,8 +273,7 @@ void setupWebServerHandlers() {
       server.send(200, "text/html", html);
     }
   });
-
-  // 2. ОБРАБОТЧИК ДЛЯ HOME ASSISTANT
+  // 2. ОБРАБОТЧИК ДЛЯ HOME ASSISTANT / API
   server.on("/api/status", []() {
     String json = "{";
     json += "\"pressure\":" + String(currentPressure) + ",";
@@ -255,6 +284,7 @@ void setupWebServerHandlers() {
     json += "\"low_level\":" + String(user_data.lowLevel) + ",";
     json += "\"high_level\":" + String(user_data.highLevel) + ",";
     json += "\"timeout_value\":" + String(user_data.timeoutValue) + ",";
+    json += "\"post_run_timeout\":" + String(user_data.postRunTimeout) + ",";
     json += "\"running_seconds\":" + String(runningSeconds) + ",";
     json += "\"seconds_left\":" + String(secondsLeft) + ",";
     json += "\"wifi_rssi\":" + String(wifiSignalDbm) + ",";   
@@ -270,6 +300,7 @@ void setupWebServerHandlers() {
     long new_low    = server.arg("low").toInt(); 
     long new_high   = server.arg("high").toInt();
     unsigned long new_timeout = server.arg("timeout").toInt();
+    unsigned long new_post_run = server.arg("post_run").toInt();
 
     bool wifiChanged = false;
     bool securityChanged = false;
@@ -287,7 +318,6 @@ void setupWebServerHandlers() {
       }
     }
 
-    // Сохранение OTA-паролей ТОЛЬКО если запрос отправлен из режима конфигурации
     if (isConfigMode) {
       String req_ota_u = server.arg("ota_u");
       String req_ota_p = server.arg("ota_p");
@@ -309,16 +339,18 @@ void setupWebServerHandlers() {
     user_data.lowLevel = new_low; 
     user_data.highLevel = new_high; 
     user_data.timeoutValue = new_timeout; 
+    user_data.postRunTimeout = new_post_run;
     user_data.configID = 0xABCD1234;
 
     EEPROM.put(0, user_data); 
     EEPROM.commit();
 
     if (isConfigMode || wifiChanged || securityChanged) {
-      server.send(200, "text/html", "<html><meta charset='UTF-8'><body><h3>Данные сохранены. Перезагрузка системы...</h3></body></html>");
+      server.send(200, "text/html", "<html><meta charset='UTF-8'><body><h3>Данные сохранены. Перезагрузка...</h3></body></html>");
       needRestart = true; 
     } else {
       timeoutTriggered = false; 
+      isPostRunning = false;
       String html = "<html><meta charset='UTF-8'><body><h3>Настройки применены «на лету»!</h3>";
       html += "<script>setTimeout(function(){ window.location.href = '/'; }, 1500);</script></body></html>";
       server.send(200, "text/html", html);
@@ -327,19 +359,19 @@ void setupWebServerHandlers() {
 
   // 4. СЕРВИСНЫЕ И УПРАВЛЯЮЩИЕ ЭНДПОИНТЫ
   server.on("/pump_on", []() {
-    if (isConfigMode || manualMode) { pumpState = true; pumpStartTime = millis(); timeoutTriggered = false; }
+    if (isConfigMode || manualMode) { pumpState = true; pumpStartTime = millis(); timeoutTriggered = false; isPostRunning = false; }
     server.sendHeader("Location", "/"); server.send(303);
   });
   server.on("/pump_off", []() {
-    if (isConfigMode || manualMode) pumpState = false;
+    if (isConfigMode || manualMode) { pumpState = false; isPostRunning = false; }
     server.sendHeader("Location", "/"); server.send(303);
   });
   server.on("/set_manual", []() {
-    if (!isConfigMode) { manualMode = true; pumpState = false; digitalWrite(pinRelay, LOW); }
+    if (!isConfigMode) { manualMode = true; pumpState = false; isPostRunning = false; digitalWrite(pinRelay, LOW); }
     server.sendHeader("Location", "/"); server.send(303);
   });
   server.on("/set_auto", []() {
-    if (!isConfigMode) { manualMode = false; timeoutTriggered = false; }
+    if (!isConfigMode) { manualMode = false; timeoutTriggered = false; isPostRunning = false; }
     server.sendHeader("Location", "/"); server.send(303);
   });
   server.on("/go_config", []() {
@@ -351,9 +383,8 @@ void setupWebServerHandlers() {
     }
   });
 
-  // 5. ИСПРАВЛЕННЫЙ ПЕРЕХВАТ СТРАНИЦЫ ОБНОВЛЕНИЯ (Блокирует пустые поля в памяти)
+  // 5. СТРАНИЦА ОБНОВЛЕНИЯ ПО ВОЗДУХУ (OTA)
   server.on("/update", HTTP_GET, []() {
-    // Если логин или пароль пустые (не заданы), доступ по воздуху ПОЛНОСТЬЮ блокируется!
     if (strlen(user_data.otaUser) == 0 || strlen(user_data.otaPass) == 0) {
       server.send(403, "text/html", "<html><meta charset='UTF-8'><body><h2>Ошибка 403: Доступ заблокирован. Установите логин и пароль в режиме конфигурации устройства!</h2></body></html>");
       return;
@@ -379,15 +410,15 @@ void setup() {
 
   EEPROM.get(0, user_data);
   
-  // При первом запуске нового чипа забиваем структуру нулями (Wi-Fi и OTA будут пустыми)
   if (user_data.configID != 0xABCD1234) { 
     memset(user_data.ssid, 0, 32);
     memset(user_data.pass, 0, 32);
-    memset(user_data.otaUser, 0, 32); // СТРОГО ПУСТО ПРИ СТАРТЕ!
-    memset(user_data.otaPass, 0, 32); // СТРОГО ПУСТО ПРИ СТАРТЕ!
+    memset(user_data.otaUser, 0, 32); 
+    memset(user_data.otaPass, 0, 32); 
     user_data.lowLevel = 2000;
     user_data.highLevel = 8000;
     user_data.timeoutValue = 60;
+    user_data.postRunTimeout = 0; 
     user_data.configID = 0xABCD1234;
     EEPROM.put(0, user_data);
     EEPROM.commit();
@@ -430,17 +461,55 @@ void loop() {
 
       // Логика авто-режима
       if (!manualMode && !timeoutTriggered) {
-        if (currentPressure >= user_data.highLevel && !pumpState) {
-          pumpState = true; pumpStartTime = millis(); 
-          Serial.println("Порог превышен! Авто-включение.");
+        
+        // --- РЕЖИМ 1: ОТКАЧКА ВОДЫ (Порог ВЫКЛ < Порог ВКЛ) ---
+        if (user_data.lowLevel < user_data.highLevel) {
+          if (currentPressure >= user_data.highLevel && !pumpState) {
+            pumpState = true; pumpStartTime = millis(); isPostRunning = false;
+            Serial.println("ОТКАЧКА: Порог включения превышен! Начало работы.");
+          }
+          if (currentPressure <= user_data.lowLevel && pumpState && !isPostRunning) {
+            if (user_data.postRunTimeout > 0) {
+              isPostRunning = true; postRunStartTime = millis();
+              Serial.println("ОТКАЧКА: Порог выключения достигнут. Старт докачки.");
+            } else {
+              pumpState = false;
+              Serial.println("ОТКАЧКА: Порог выключения достигнут. Выключение.");
+            }
+          }
+        } 
+        
+        // --- РЕЖИМ 2: ЗАКАЧКА ВОДЫ (Порог ВЫКЛ > Порог ВКЛ) ---
+        else {
+          if (currentPressure <= user_data.highLevel && !pumpState) {
+            pumpState = true; pumpStartTime = millis(); isPostRunning = false;
+            Serial.println("ЗАКАЧКА: Уровень упал ниже порога! Начало наполнения.");
+          }
+          if (currentPressure >= user_data.lowLevel && pumpState && !isPostRunning) {
+            if (user_data.postRunTimeout > 0) {
+              isPostRunning = true; postRunStartTime = millis();
+              Serial.println("ЗАКАЧКА: Порог выключения достигнут. Старт доп. времени.");
+            } else {
+              pumpState = false;
+              Serial.println("ЗАКАЧКА: Порог выключения достигнут. Выключение.");
+            }
+          }
         }
-        if (currentPressure <= user_data.lowLevel && pumpState) {
-          pumpState = false;
-          Serial.println("Колодец пуст. Авто-выключение.");
+
+        // --- ОБЩАЯ ПРОВЕРКА ОКОНЧАНИЯ ДОПОЛНИТЕЛЬНОГО ВРЕМЕНИ ДОКАЧКИ ---
+        if (pumpState && isPostRunning) {
+          if (millis() - postRunStartTime >= (user_data.postRunTimeout * 1000)) {
+            pumpState = false;
+            isPostRunning = false;
+            Serial.println("Дополнительное время работы истекло. Авто-выключение.");
+          }
         }
+        
+      } else {
+        isPostRunning = false;
       }
 
-      // Проверка защитного таймаута
+      // Проверка защитного таймаута аварии (учитывает полное время работы реле)
       if (pumpState) {
         unsigned long workingTimeMs = millis() - pumpStartTime;
         runningSeconds = workingTimeMs / 1000;
@@ -451,18 +520,23 @@ void loop() {
         } else {
           secondsLeft = -1;
         }
-
         if (user_data.timeoutValue > 0 && runningSeconds >= user_data.timeoutValue) {
-          pumpState = false; timeoutTriggered = true;
+          pumpState = false; 
+          timeoutTriggered = true; 
+          isPostRunning = false;
           digitalWrite(pinRelay, LOW);
           Serial.println("КРИТИЧЕСКАЯ ОШИБКА: Превышен таймаут!");
         }
       } else {
-        runningSeconds = 0; secondsLeft = 0; 
+        runningSeconds = 0; 
+        secondsLeft = 0; 
       }
 
-      if (!timeoutTriggered) { digitalWrite(pinRelay, pumpState ? HIGH : LOW); } 
-      else { digitalWrite(pinRelay, LOW); }
+      if (!timeoutTriggered) { 
+        digitalWrite(pinRelay, pumpState ? HIGH : LOW); 
+      } else { 
+        digitalWrite(pinRelay, LOW); 
+      }
     } else {
       digitalWrite(pinRelay, pumpState ? HIGH : LOW);
     }
