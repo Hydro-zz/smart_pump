@@ -202,9 +202,9 @@ void setupWebServerHandlers() {
         stateText = pumpState ? "<b style='color:orange; font-size:1.4em;'>РУЧНОЙ РЕЖИМ: ВКЛ</b>" : "<b style='color:orange; font-size:1.4em;'>РУЧНОЙ РЕЖИМ: ВЫКЛ</b>";
       } else {
         if (user_data.lowLevel < user_data.highLevel) {
-          stateText = pumpState ? "<b style='color:green; font-size:1.4em;'>АВТО: ОТКАЧКА</b>" : "<b style='color:red; font-size:1.4em;'>АВТО: ОЖИДАНИЕ</b>";
+          stateText = pumpState ? "<b style='color:green; font-size:1.4em;'>АВТО: ВКЛ</b>" : "<b style='color:green; font-size:1.4em;'>АВТО: ОЖИДАНИЕ</b>";
         } else {
-          stateText = pumpState ? "<b style='color:green; font-size:1.4em;'>АВТО: ЗАКАЧКА</b>" : "<b style='color:red; font-size:1.4em;'>АВТО: НАПОЛНЕНО</b>";
+          stateText = pumpState ? "<b style='color:green; font-size:1.4em;'>АВТО: ВКЛ</b>" : "<b style='color:green; font-size:1.4em;'>АВТО: НАПОЛНЕНО</b>";
         }
       }
       
@@ -259,6 +259,12 @@ void setupWebServerHandlers() {
       html += "    document.getElementById('w_pct').innerText = data.wifi_pct;";
       html += "    document.getElementById('w_dbm').innerText = data.wifi_rssi;";
       html += "    var pbar = document.getElementById('pbar'); pbar.style.width = data.percent + '%'; pbar.innerText = data.percent + '%';";
+      html += "    var statusText = '';";
+      html += "    if (data.timeout_triggered) { statusText = \"<b style='color:purple; font-size:1.4em;'>АВАРИЯ: ТАЙМАУТ ПРЕВЫШЕН!</b>\"; }";
+      html += "    else if (data.manual_mode) { statusText = data.pump_state ? \"<b style='color:orange; font-size:1.4em;'>РУЧНОЙ РЕЖИМ: ВКЛ</b>\" : \"<b style='color:orange; font-size:1.4em;'>РУЧНОЙ РЕЖИМ: ВЫКЛ</b>\"; }";
+      html += "    else if (data.low_level < data.high_level) { statusText = data.pump_state ? \"<b style='color:green; font-size:1.4em;'>АВТО: ВКЛ</b>\" : \"<b style='color:green; font-size:1.4em;'>АВТО: ОЖИДАНИЕ</b>\"; }";
+      html += "    else { statusText = data.pump_state ? \"<b style='color:green; font-size:1.4em;'>АВТО: ВКЛ</b>\" : \"<b style='color:green; font-size:1.4em;'>АВТО: НАПОЛНЕНО</b>\"; }";
+      html += "    document.getElementById('status_text').innerHTML = statusText;";
       html += "    if (data.pump_state) {";
       html += "      document.getElementById('timers_block').style.display = 'block';";
       html += "      document.getElementById('t_run').innerText = data.running_seconds + ' сек';";
